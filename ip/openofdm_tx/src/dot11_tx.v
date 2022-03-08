@@ -132,11 +132,14 @@ assign crc_en = (bits_enc_fifo_iready == 1 && state1 == S1_DATA && state11 == S1
 reg       bit_scram;
 reg [6:0] data_scram_state;
 always @* begin
-    bit_scram = 0;
+    bit_scram = 0; // TODO what is this? -> this is the output of something that looks like a linear feedback shift register
 
     // Legacy PLCP [rate + reserved + length + parity + tail] and HT PLCP [MCS + length + reserved + short/long GI + CRC + tail] fields
-    if(state1 == S1_L_SIG || state1 == S1_HT_SIG)
+    if((state1 == S1_L_SIG && plcp_bit_cnt == 0) || (state1 == S1_HT_SIG))
         bit_scram = bram_din[plcp_bit_cnt];
+
+    else if (state1 == S1_L_SIG)
+        bit_scram = bram_current[plcp_bit_cnt];
 
     // DATA [service + PSDU + CRC + tail + pad] fields
     else if(state1 == S1_DATA) begin
@@ -144,7 +147,7 @@ always @* begin
         if(state11 == S11_SERVICE) begin
             bit_scram = data_scram_state[6] ^ data_scram_state[3] ^ 0;
 
-        // PSDU DATA feild
+        // PSDU DATA field
         end else if(state11 == S11_PSDU_DATA) begin
             bit_scram = data_scram_state[6] ^ data_scram_state[3] ^ bram_din[psdu_bit_cnt[5:0]];
 
@@ -186,8 +189,10 @@ reg [2:0]  N_BPSC;
 reg [8:0]  N_DBPS;
 reg [4:0]  RATE;
 reg [14:0] PSDU_BIT_LEN;
-reg        S_GI;
+reg        S_GI;   // TODO what is this? -> short guard interval: 400ns between symbols instead of 800ns
 reg [8:0]  dbps_cnt_FSM1;
+reg [63:0] bram_preread; // this will contain the parameters for the S1_HT_SIG (so not the actual sent data)
+reg [63:0] bram_current; // in S1_L_SIG, this is a copy of bram_din
 
 always @(posedge clk)
 if (reset_int) begin
@@ -206,6 +211,8 @@ if (reset_int) begin
     data_scram_state <= 0;
     state1 <= S1_WAIT_PKT;
     state11 <= S11_SERVICE;
+    bram_preread <= 0;
+    bram_current <= 0;
 
 end else if(bits_enc_fifo_iready == 1) begin
     case(state1)
@@ -216,11 +223,16 @@ end else if(bits_enc_fifo_iready == 1) begin
             state1 <= S1_L_SIG;
         end
     end
-
+    // bit 0-3: data rate
+    // bit 4: future use
+    // bit 5-16: length of PSDU in bytes
+    // bit 17: parity
+    // bit 18-23: all zeroes
     S1_L_SIG: begin
+    // https://rfmw.em.keysight.com/wireless/helpfiles/n7617a/legacy_signal_field.htm
         plcp_bit_cnt <= plcp_bit_cnt + 1;
         if(plcp_bit_cnt == 0) begin
-            case(bram_din[3:0])
+            case(bram_din[3+32:0+32])
                 4'b1011: begin  N_BPSC <= 1;  N_DBPS <= 24;  RATE <= 5'b01011; end  //  6 Mbps
                 4'b1111: begin  N_BPSC <= 1;  N_DBPS <= 36;  RATE <= 5'b01111; end  //  9 Mbps
                 4'b1010: begin  N_BPSC <= 2;  N_DBPS <= 48;  RATE <= 5'b01010; end  // 12 Mbps
@@ -231,11 +243,17 @@ end else if(bits_enc_fifo_iready == 1) begin
                 4'b1100: begin  N_BPSC <= 6;  N_DBPS <= 216; RATE <= 5'b01100; end  // 54 Mbps
                 default: begin  N_BPSC <= 1;  N_DBPS <= 24;  RATE <= 5'b01011; end  //  6 Mbps
             endcase
-            PSDU_BIT_LEN <= ({3'd0, bram_din[16:5]} << 3);
-            PKT_TYPE <= bram_din[24];
+            PSDU_BIT_LEN <= ({3'd0, bram_din[16+32:5+32]} << 3);
+            PKT_TYPE <= bram_din[24+32];
+            bram_current <= bram_din;
+            bram_addr <= 1;
+
+        if (plcp_bit_cnt == 1) begin
+            bram_preread <= bram_din;
+        end
 
         end else if(plcp_bit_cnt == 22) begin
-            bram_addr <= 1;
+            bram_addr <= 2;
 
         end else if(plcp_bit_cnt == 23) begin
             ofdm_cnt_FSM1 <= ofdm_cnt_FSM1 + 1;
@@ -260,9 +278,11 @@ end else if(bits_enc_fifo_iready == 1) begin
     end
 
     S1_HT_SIG: begin
+        // High Thoughput Signal https://rfmw.em.keysight.com/wireless/helpfiles/n7617a/high_throughput_signal_field.htm
+        // this starts with bram_addr == 2
         plcp_bit_cnt <= plcp_bit_cnt + 1;
         if(plcp_bit_cnt == 0) begin
-            case(bram_din[2:0])
+            case(bram_preread[2:0])
                 3'b000:  begin  N_BPSC <= 1;  N_DBPS <= 26;  RATE <= 5'b10000; end  //  6.5 Mbps
                 3'b001:  begin  N_BPSC <= 2;  N_DBPS <= 52;  RATE <= 5'b10001; end  // 13.0 Mbps
                 3'b010:  begin  N_BPSC <= 2;  N_DBPS <= 78;  RATE <= 5'b10010; end  // 19.5 Mbps
@@ -273,8 +293,8 @@ end else if(bits_enc_fifo_iready == 1) begin
                 3'b111:  begin  N_BPSC <= 6;  N_DBPS <= 260; RATE <= 5'b10111; end  // 65.0 Mbps
                 default: begin  N_BPSC <= 1;  N_DBPS <= 26;  RATE <= 5'b10000; end  //  6.5 Mbps
             endcase
-            PSDU_BIT_LEN <= ({3'd0, bram_din[19:8]} << 3);
-            S_GI <= bram_din[31];
+            PSDU_BIT_LEN <= ({3'd0, bram_preread[19:8]} << 3);
+            S_GI <= bram_preread[31];
         end else if(plcp_bit_cnt == 23) begin
             ofdm_cnt_FSM1 <= ofdm_cnt_FSM1 + 1;
 
@@ -296,7 +316,7 @@ end else if(bits_enc_fifo_iready == 1) begin
         S11_SERVICE: begin
             service_bit_cnt <= service_bit_cnt + 1;
             if(service_bit_cnt == 14) begin
-                bram_addr <= 2;
+                bram_addr <= 3;
             end else if(service_bit_cnt == 15) begin
                 psdu_bit_cnt <= 0;
                 state11 <= S11_PSDU_DATA;
