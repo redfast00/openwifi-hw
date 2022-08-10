@@ -135,7 +135,7 @@ always @* begin
     bit_scram = 0; // TODO what is this? -> this is the output of something that looks like a linear feedback shift register
 
     // Legacy PLCP [rate + reserved + length + parity + tail] and HT PLCP [MCS + length + reserved + short/long GI + CRC + tail] fields
-    if((state1 == S1_L_SIG && plcp_bit_cnt == 0) || (state1 == S1_HT_SIG))
+    if((state1 == S1_L_SIG && plcp_bit_cnt < 2) || (state1 == S1_HT_SIG))
         bit_scram = bram_din[plcp_bit_cnt];
 
     else if (state1 == S1_L_SIG)
@@ -246,14 +246,15 @@ end else if(bits_enc_fifo_iready == 1) begin
             PSDU_BIT_LEN <= ({3'd0, bram_din[16+32:5+32]} << 3);
             PKT_TYPE <= bram_din[24+32];
             bram_current <= bram_din;
-            bram_addr <= 1;
+        
+        end else if (plcp_bit_cnt == 4) begin
+            bram_addr <= 1; // this contains the HT hw parameters
 
-        if (plcp_bit_cnt == 1) begin
+        end else if (plcp_bit_cnt == 8) begin
             bram_preread <= bram_din;
-        end
 
-        end else if(plcp_bit_cnt == 22) begin
-            bram_addr <= 2;
+        end else if(plcp_bit_cnt == 16) begin
+            bram_addr <= 2; // already switch to either data (for legacy) or to HT on-air
 
         end else if(plcp_bit_cnt == 23) begin
             ofdm_cnt_FSM1 <= ofdm_cnt_FSM1 + 1;
